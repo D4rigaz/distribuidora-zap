@@ -20,9 +20,11 @@ interface CartItem {
 }
 
 interface Session {
-    step: 'idle' | 'awaiting_quantity';
+    step: 'idle' | 'awaiting_quantity' | 'awaiting_name' | 'awaiting_address' | 'confirming_address';
     lastProductId?: number;
     cart: CartItem[];
+    tempName?: string;
+    tempAddress?: string;
 }
 
 const sessions: Record<string, Session> = {};
@@ -124,10 +126,33 @@ async function connectToWhatsApp() {
                         return;
                     }
 
-                    // 2. LOGICA DE ESTADO (CARRINHO)
+                    if (input === 'finalizar') {
+                        if (session.cart.length === 0) {
+                            await sock.sendMessage(from, { text: "Seu carrinho está vazio! Digite *MENU* para escolher algo." });
+                            return;
+                        }
+
+                        // Verificar se o cliente já existe
+                        const customer = await db('customers').where({ phone: from }).first();
+
+                        if (!customer) {
+                            session.step = 'awaiting_name';
+                            await sock.sendMessage(from, { text: "Vi que é sua primeira vez por aqui! 😊\n\nQual o seu *nome completo*?" });
+                        } else {
+                            session.step = 'confirming_address';
+                            session.tempName = customer.name;
+                            session.tempAddress = customer.address;
+                            await sock.sendMessage(from, { 
+                                text: `Confirmamos seu cadastro, *${customer.name}*!\n\nDeseja entregar no endereço abaixo?\n📍 ${customer.address}\n\nResponda com *SIM* para confirmar ou digite o *NOVO ENDEREÇO* de entrega.` 
+                            });
+                        }
+                        return;
+                    }
+
+                    // 2. LOGICA DE ESTADO
                     if (session.step === 'idle' && /^\d+$/.test(input)) {
                         const productId = parseInt(input);
-                        const product = await db('products').where({ id: productId, stock: productId }).first() || await db('products').where({ id: productId }).first();
+                        const product = await db('products').where({ id: productId }).first();
                         
                         if (!product || product.stock <= 0) {
                             await sock.sendMessage(from, { text: "Opa! Código inválido ou produto sem estoque. Digite *MENU* para ver as opções." });
@@ -147,7 +172,6 @@ async function connectToWhatsApp() {
 
                         const product = await db('products').where({ id: session.lastProductId }).first();
                         if (product) {
-                            // Adicionar ao carrinho (ou somar se já existir)
                             const existingIndex = session.cart.findIndex(i => i.id === product.id);
                             if (existingIndex > -1) {
                                 session.cart[existingIndex]!.quantity += quantity;
@@ -163,6 +187,65 @@ async function connectToWhatsApp() {
                         }
                         session.step = 'idle';
                         delete session.lastProductId;
+                    }
+                    else if (session.step === 'awaiting_name') {
+                        session.tempName = text;
+                        session.step = 'awaiting_address';
+                        await sock.sendMessage(from, { text: `Prazer, ${text}! Agora, qual o *endereço completo* para a entrega? (Rua, número, bairro e complemento)` });
+                    }
+                    else if (session.step === 'awaiting_address' || (session.step === 'confirming_address' && input !== 'sim')) {
+                        const address = text;
+                        const finalName = session.tempName!;
+                        
+                        // Upsert customer
+                        const customer = await db('customers').where({ phone: from }).first();
+                        if (customer) {
+                            await db('customers').where({ phone: from }).update({ name: finalName, address: address, last_interaction: db.fn.now() });
+                        } else {
+                            await db('customers').insert({ phone: from, name: finalName, address: address });
+                        }
+
+                        // Criar Pedido
+                        const total = session.cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+                        const [orderId] = await db('orders').insert({
+                            customer_phone: from,
+                            items: JSON.stringify(session.cart),
+                            total: total,
+                            status: 'Pendente'
+                        });
+
+                        await sock.sendMessage(from, { 
+                            text: `🚀 *PEDIDO RECEBIDO COM SUCESSO!* 🚀\n\n*Número do Pedido:* #${orderId}\n*Cliente:* ${finalName}\n*Endereço:* ${address}\n*Total:* R$ ${total.toFixed(2).replace('.', ',')}\n\nEm breve você receberá atualizações sobre a entrega! 🍻` 
+                        });
+
+                        // Limpar Sessão
+                        session.step = 'idle';
+                        session.cart = [];
+                        delete session.tempName;
+                        delete session.tempAddress;
+                    }
+                    else if (session.step === 'confirming_address' && input === 'sim') {
+                        const finalName = session.tempName!;
+                        const address = session.tempAddress!;
+
+                        // Criar Pedido
+                        const total = session.cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+                        const [orderId] = await db('orders').insert({
+                            customer_phone: from,
+                            items: JSON.stringify(session.cart),
+                            total: total,
+                            status: 'Pendente'
+                        });
+
+                        await sock.sendMessage(from, { 
+                            text: `🚀 *PEDIDO RECEBIDO COM SUCESSO!* 🚀\n\n*Número do Pedido:* #${orderId}\n*Cliente:* ${finalName}\n*Endereço:* ${address}\n*Total:* R$ ${total.toFixed(2).replace('.', ',')}\n\nEm breve você receberá atualizações sobre a entrega! 🍻` 
+                        });
+
+                        // Limpar Sessão
+                        session.step = 'idle';
+                        session.cart = [];
+                        delete session.tempName;
+                        delete session.tempAddress;
                     }
                 }
             }
