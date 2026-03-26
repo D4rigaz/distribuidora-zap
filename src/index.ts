@@ -11,6 +11,30 @@ import db from './database/connection.js';
 // Configuração do logger para evitar poluição visual
 const logger = pino({ level: 'silent' });
 
+// --- GESTÃO DE SESSÃO (MOCK DE REDIS) ---
+interface CartItem {
+    id: number;
+    name: string;
+    price: number;
+    quantity: number;
+}
+
+interface Session {
+    step: 'idle' | 'awaiting_quantity';
+    lastProductId?: number;
+    cart: CartItem[];
+}
+
+const sessions: Record<string, Session> = {};
+
+function getSession(from: string): Session {
+    if (!sessions[from]) {
+        sessions[from] = { step: 'idle', cart: [] };
+    }
+    return sessions[from]!;
+}
+// ----------------------------------------
+
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
     const { version, isLatest } = await fetchLatestBaileysVersion();
@@ -36,16 +60,12 @@ async function connectToWhatsApp() {
 
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('Conexão fechada devido a erro. Tentando reconectar:', shouldReconnect);
-            if (shouldReconnect) {
-                connectToWhatsApp();
-            }
+            if (shouldReconnect) connectToWhatsApp();
         } else if (connection === 'open') {
             console.log('Conexão estabelecida com sucesso! O bot está online.');
         }
     });
 
-    // Ouvinte de mensagens recebidas
     sock.ev.on('messages.upsert', async (m) => {
         if (m.type === 'notify') {
             for (const msg of m.messages) {
@@ -53,31 +73,22 @@ async function connectToWhatsApp() {
                     const from = msg.key.remoteJid!;
                     const name = msg.pushName || 'Cliente';
                     const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+                    const input = text.trim().toLowerCase();
+                    const session = getSession(from);
 
-                    console.log(`Mensagem recebida de ${name} (${from}): ${text}`);
+                    console.log(`[${from}] ${name}: ${text}`);
 
-                    const input = text.toLowerCase();
-
-                    // Lógica do Menu (Issue #1)
-                    if (input === 'oi' || input === 'ola' || input === 'olá') {
-                        await sock.sendMessage(from, { 
-                            text: `Olá, ${name}! Bem-vindo à Distribuidora Zap. 🍻\nDigite *MENU* para ver nossos produtos ou *PEDIDO* para ver o status do seu pedido.` 
-                        });
-                    } else if (input === 'menu') {
-                        try {
-                            // Buscar produtos com estoque agrupados por categoria
-                            const products = await db('products')
-                                .where('stock', '>', 0)
-                                .orderBy('category', 'asc');
-
+                    // 1. GATILHOS GLOBAIS
+                    if (['oi', 'olá', 'ola', 'menu', 'inicio'].includes(input)) {
+                        session.step = 'idle';
+                        if (input === 'menu') {
+                            const products = await db('products').where('stock', '>', 0).orderBy('category', 'asc');
                             if (products.length === 0) {
-                                await sock.sendMessage(from, { text: "No momento, estamos sem produtos em estoque. Tente novamente mais tarde! 😔" });
+                                await sock.sendMessage(from, { text: "No momento, estamos sem estoque. 😔" });
                                 return;
                             }
-
                             let menuMessage = "🍻 *NOSSO CARDÁPIO* 🍻\n\n";
                             let currentCategory = "";
-
                             products.forEach((prod) => {
                                 if (prod.category !== currentCategory) {
                                     currentCategory = prod.category;
@@ -85,14 +96,73 @@ async function connectToWhatsApp() {
                                 }
                                 menuMessage += `[${prod.id}] ${prod.name} - R$ ${prod.price.toFixed(2).replace('.', ',')}\n`;
                             });
-
                             menuMessage += "\n\nPara pedir, digite o *código* do produto (ex: *1*).";
-
                             await sock.sendMessage(from, { text: menuMessage });
-                        } catch (error) {
-                            console.error("Erro ao buscar produtos:", error);
-                            await sock.sendMessage(from, { text: "Opa, tivemos um problema ao carregar o menu. Tente novamente." });
+                        } else {
+                            await sock.sendMessage(from, { 
+                                text: `Olá, ${name}! Bem-vindo à Distribuidora Zap. 🍻\n\nDigite *MENU* para ver produtos.\nDigite *CARRINHO* para ver seu pedido.` 
+                            });
                         }
+                        return;
+                    }
+
+                    if (input === 'carrinho') {
+                        if (session.cart.length === 0) {
+                            await sock.sendMessage(from, { text: "Seu carrinho está vazio! Digite *MENU* para escolher algo." });
+                            return;
+                        }
+                        let cartMsg = "🛒 *SEU CARRINHO* 🛒\n\n";
+                        let total = 0;
+                        session.cart.forEach(item => {
+                            const subtotal = item.price * item.quantity;
+                            total += subtotal;
+                            cartMsg += `• ${item.quantity}x ${item.name} - R$ ${subtotal.toFixed(2).replace('.', ',')}\n`;
+                        });
+                        cartMsg += `\n*TOTAL: R$ ${total.toFixed(2).replace('.', ',')}*`;
+                        cartMsg += "\n\nDigite *MENU* para adicionar mais ou *FINALIZAR* para fechar o pedido.";
+                        await sock.sendMessage(from, { text: cartMsg });
+                        return;
+                    }
+
+                    // 2. LOGICA DE ESTADO (CARRINHO)
+                    if (session.step === 'idle' && /^\d+$/.test(input)) {
+                        const productId = parseInt(input);
+                        const product = await db('products').where({ id: productId, stock: productId }).first() || await db('products').where({ id: productId }).first();
+                        
+                        if (!product || product.stock <= 0) {
+                            await sock.sendMessage(from, { text: "Opa! Código inválido ou produto sem estoque. Digite *MENU* para ver as opções." });
+                            return;
+                        }
+
+                        session.step = 'awaiting_quantity';
+                        session.lastProductId = product.id;
+                        await sock.sendMessage(from, { text: `Quantas unidades de *${product.name}* você deseja?` });
+                    } 
+                    else if (session.step === 'awaiting_quantity' && /^\d+$/.test(input)) {
+                        const quantity = parseInt(input);
+                        if (quantity <= 0) {
+                            await sock.sendMessage(from, { text: "Por favor, digite uma quantidade válida (maior que 0)." });
+                            return;
+                        }
+
+                        const product = await db('products').where({ id: session.lastProductId }).first();
+                        if (product) {
+                            // Adicionar ao carrinho (ou somar se já existir)
+                            const existingIndex = session.cart.findIndex(i => i.id === product.id);
+                            if (existingIndex > -1) {
+                                session.cart[existingIndex]!.quantity += quantity;
+                            } else {
+                                session.cart.push({
+                                    id: product.id,
+                                    name: product.name,
+                                    price: product.price,
+                                    quantity: quantity
+                                });
+                            }
+                            await sock.sendMessage(from, { text: `✅ Adicionado: ${quantity}x ${product.name}.\n\nDigite *MENU* para continuar comprando ou *CARRINHO* para ver seu pedido.` });
+                        }
+                        session.step = 'idle';
+                        delete session.lastProductId;
                     }
                 }
             }
@@ -100,5 +170,4 @@ async function connectToWhatsApp() {
     });
 }
 
-// Inicia o processo
 connectToWhatsApp().catch(err => console.log("Erro inesperado:", err));
