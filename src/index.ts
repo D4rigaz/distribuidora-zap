@@ -132,7 +132,6 @@ async function connectToWhatsApp() {
                             return;
                         }
 
-                        // Verificar se o cliente já existe
                         const customer = await db('customers').where({ phone: from }).first();
 
                         if (!customer) {
@@ -197,7 +196,6 @@ async function connectToWhatsApp() {
                         const address = text;
                         const finalName = session.tempName!;
                         
-                        // Upsert customer
                         const customer = await db('customers').where({ phone: from }).first();
                         if (customer) {
                             await db('customers').where({ phone: from }).update({ name: finalName, address: address, last_interaction: db.fn.now() });
@@ -205,7 +203,6 @@ async function connectToWhatsApp() {
                             await db('customers').insert({ phone: from, name: finalName, address: address });
                         }
 
-                        // Criar Pedido
                         const total = session.cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
                         const [orderId] = await db('orders').insert({
                             customer_phone: from,
@@ -218,7 +215,6 @@ async function connectToWhatsApp() {
                             text: `🚀 *PEDIDO RECEBIDO COM SUCESSO!* 🚀\n\n*Número do Pedido:* #${orderId}\n*Cliente:* ${finalName}\n*Endereço:* ${address}\n*Total:* R$ ${total.toFixed(2).replace('.', ',')}\n\nEm breve você receberá atualizações sobre a entrega! 🍻` 
                         });
 
-                        // Limpar Sessão
                         session.step = 'idle';
                         session.cart = [];
                         delete session.tempName;
@@ -228,7 +224,6 @@ async function connectToWhatsApp() {
                         const finalName = session.tempName!;
                         const address = session.tempAddress!;
 
-                        // Criar Pedido
                         const total = session.cart.reduce((sum, item) => sum + (item.price * item.quantity), 0);
                         const [orderId] = await db('orders').insert({
                             customer_phone: from,
@@ -241,7 +236,6 @@ async function connectToWhatsApp() {
                             text: `🚀 *PEDIDO RECEBIDO COM SUCESSO!* 🚀\n\n*Número do Pedido:* #${orderId}\n*Cliente:* ${finalName}\n*Endereço:* ${address}\n*Total:* R$ ${total.toFixed(2).replace('.', ',')}\n\nEm breve você receberá atualizações sobre a entrega! 🍻` 
                         });
 
-                        // Limpar Sessão
                         session.step = 'idle';
                         session.cart = [];
                         delete session.tempName;
