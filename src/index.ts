@@ -1,173 +1,150 @@
 import makeWASocket, { 
     DisconnectReason, 
     useMultiFileAuthState,
-    fetchLatestBaileysVersion
+    fetchLatestBaileysVersion,
+    jidNormalizedUser
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
 import qrcode from 'qrcode-terminal';
 import pino from 'pino';
-import db from './database/connection.js';
+import * as dotenv from 'dotenv';
+import { ProductService } from './services/productService.js';
+import { CustomerService } from './services/customerService.js';
+import { OrderService } from './services/orderService.js';
+import { SessionService, Session } from './services/sessionService.js';
+import { GoogleSheetsService } from './services/googleSheetsService.js';
+import { NotificationService } from './services/notificationService.js';
 
-// Configuração do logger para evitar poluição visual
+dotenv.config();
+
+const ADMIN_PHONE = process.env.ADMIN_PHONE || '5561900000000@s.whatsapp.net';
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '';
+
+if (SPREADSHEET_ID) {
+    GoogleSheetsService.init(SPREADSHEET_ID);
+}
+
 const logger = pino({ level: 'silent' });
-
-// --- GESTÃO DE SESSÃO (MOCK DE REDIS) ---
-interface CartItem {
-    id: number;
-    name: string;
-    price: number;
-    quantity: number;
-}
-
-interface Session {
-    step: 'idle' | 'awaiting_quantity';
-    lastProductId?: number;
-    cart: CartItem[];
-}
-
-const sessions: Record<string, Session> = {};
-
-function getSession(from: string): Session {
-    if (!sessions[from]) {
-        sessions[from] = { step: 'idle', cart: [] };
-    }
-    return sessions[from]!;
-}
-// ----------------------------------------
 
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
-    const { version, isLatest } = await fetchLatestBaileysVersion();
+    const { version } = await fetchLatestBaileysVersion();
 
-    console.log(`Usando WhatsApp Web v${version.join('.')}, isLatest: ${isLatest}`);
+    console.log(`Iniciando bot v${version.join('.')}...`);
 
     const sock = makeWASocket({
         version,
         auth: state,
         logger,
-        browser: ['Distribuidora Zap', 'Chrome', '1.0.0']
+        browser: ['Distribuidora Zap', 'Chrome', '1.0.0'],
+        markOnlineOnConnect: true
     });
 
     sock.ev.on('creds.update', saveCreds);
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
-
-        if (qr) {
-            console.log('Escaneie o QR Code abaixo com seu WhatsApp:');
-            qrcode.generate(qr, { small: true });
-        }
-
+        if (qr) qrcode.generate(qr, { small: true });
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
             if (shouldReconnect) connectToWhatsApp();
         } else if (connection === 'open') {
-            console.log('Conexão estabelecida com sucesso! O bot está online.');
+            console.log('✅ Bot Conectado e Online!');
         }
     });
 
     sock.ev.on('messages.upsert', async (m) => {
-        if (m.type === 'notify') {
-            for (const msg of m.messages) {
-                if (!msg.key.fromMe && msg.message) {
-                    const from = msg.key.remoteJid!;
-                    const name = msg.pushName || 'Cliente';
-                    const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
-                    const input = text.trim().toLowerCase();
-                    const session = getSession(from);
+        if (m.type !== 'notify') return;
 
-                    console.log(`[${from}] ${name}: ${text}`);
+        for (const msg of m.messages) {
+            try {
+                if (msg.key.fromMe) continue;
+                const remoteJid = msg.key.remoteJid!;
+                if (remoteJid.endsWith('@g.us') || remoteJid.endsWith('@newsletter')) continue;
 
-                    // 1. GATILHOS GLOBAIS
-                    if (['oi', 'olá', 'ola', 'menu', 'inicio'].includes(input)) {
-                        session.step = 'idle';
-                        if (input === 'menu') {
-                            const products = await db('products').where('stock', '>', 0).orderBy('category', 'asc');
-                            if (products.length === 0) {
-                                await sock.sendMessage(from, { text: "No momento, estamos sem estoque. 😔" });
-                                return;
-                            }
-                            let menuMessage = "🍻 *NOSSO CARDÁPIO* 🍻\n\n";
-                            let currentCategory = "";
-                            products.forEach((prod) => {
-                                if (prod.category !== currentCategory) {
-                                    currentCategory = prod.category;
-                                    menuMessage += `\n--- *${currentCategory.toUpperCase()}* ---\n`;
-                                }
-                                menuMessage += `[${prod.id}] ${prod.name} - R$ ${prod.price.toFixed(2).replace('.', ',')}\n`;
-                            });
-                            menuMessage += "\n\nPara pedir, digite o *código* do produto (ex: *1*).";
-                            await sock.sendMessage(from, { text: menuMessage });
-                        } else {
-                            await sock.sendMessage(from, { 
-                                text: `Olá, ${name}! Bem-vindo à Distribuidora Zap. 🍻\n\nDigite *MENU* para ver produtos.\nDigite *CARRINHO* para ver seu pedido.` 
-                            });
-                        }
-                        return;
+                // Normalização inteligente para suportar LIDs (88...) e JIDs (55...)
+                const from = jidNormalizedUser(remoteJid);
+                
+                const name = msg.pushName || 'Cliente';
+                const text = msg.message?.conversation || 
+                             msg.message?.extendedTextMessage?.text || 
+                             '';
+
+                if (!text) continue;
+                const input = text.trim().toLowerCase();
+                console.log(`📩 [${from}] ${name}: ${text}`);
+
+                const session = await SessionService.getOrCreate(from);
+                await CustomerService.sync(from, name);
+
+                // FLUXO DO CLIENTE
+                if (['oi', 'menu', 'olá', 'ola', 'início', 'inicio'].includes(input)) {
+                    console.log(`🤖 Respondendo MENU para ${from}`);
+                    session.step = 'idle';
+                    const products = await ProductService.getAvailableProducts();
+                    let menu = `Olá ${name}, seja bem-vindo! 🍻\n\n*CARDÁPIO*\n`;
+                    products.forEach(p => menu += `[${p.id}] ${p.name} - R$ ${p.price.toFixed(2).replace('.', ',')}\n`);
+                    menu += "\nDigite o *código* do produto para pedir.";
+                    await sock.sendMessage(from, { text: menu });
+                } 
+                else if (input === 'carrinho') {
+                    if (session.cart.length === 0) return await sock.sendMessage(from, { text: "Seu carrinho está vazio!" });
+                    let res = "🛒 *SEU CARRINHO*\n\n";
+                    let total = 0;
+                    session.cart.forEach(i => {
+                        res += `${i.quantity}x ${i.name} - R$ ${(i.price * i.quantity).toFixed(2)}\n`;
+                        total += i.price * i.quantity;
+                    });
+                    res += `\n*TOTAL: R$ ${total.toFixed(2)}*\n\nDigite *FINALIZAR* para fechar.`;
+                    await sock.sendMessage(from, { text: res });
+                }
+                else if (input === 'finalizar') {
+                    const cust = await CustomerService.getByPhone(from);
+                    if (!cust?.address) {
+                        session.step = 'awaiting_address';
+                        await sock.sendMessage(from, { text: "📍 Por favor, digite seu endereço completo de entrega:" });
+                    } else {
+                        session.step = 'awaiting_confirmation';
+                        await sock.sendMessage(from, { text: `Confirmar pedido para entrega em:\n*${cust.address}*?\n\nDigite *SIM* ou *NÃO*.` });
                     }
-
-                    if (input === 'carrinho') {
-                        if (session.cart.length === 0) {
-                            await sock.sendMessage(from, { text: "Seu carrinho está vazio! Digite *MENU* para escolher algo." });
-                            return;
-                        }
-                        let cartMsg = "🛒 *SEU CARRINHO* 🛒\n\n";
-                        let total = 0;
-                        session.cart.forEach(item => {
-                            const subtotal = item.price * item.quantity;
-                            total += subtotal;
-                            cartMsg += `• ${item.quantity}x ${item.name} - R$ ${subtotal.toFixed(2).replace('.', ',')}\n`;
-                        });
-                        cartMsg += `\n*TOTAL: R$ ${total.toFixed(2).replace('.', ',')}*`;
-                        cartMsg += "\n\nDigite *MENU* para adicionar mais ou *FINALIZAR* para fechar o pedido.";
-                        await sock.sendMessage(from, { text: cartMsg });
-                        return;
-                    }
-
-                    // 2. LOGICA DE ESTADO (CARRINHO)
-                    if (session.step === 'idle' && /^\d+$/.test(input)) {
-                        const productId = parseInt(input);
-                        const product = await db('products').where({ id: productId, stock: productId }).first() || await db('products').where({ id: productId }).first();
-                        
-                        if (!product || product.stock <= 0) {
-                            await sock.sendMessage(from, { text: "Opa! Código inválido ou produto sem estoque. Digite *MENU* para ver as opções." });
-                            return;
-                        }
-
+                }
+                else if (session.step === 'idle' && /^\d+$/.test(input)) {
+                    const product = await ProductService.getById(parseInt(input));
+                    if (product) {
                         session.step = 'awaiting_quantity';
                         session.lastProductId = product.id;
                         await sock.sendMessage(from, { text: `Quantas unidades de *${product.name}* você deseja?` });
-                    } 
-                    else if (session.step === 'awaiting_quantity' && /^\d+$/.test(input)) {
-                        const quantity = parseInt(input);
-                        if (quantity <= 0) {
-                            await sock.sendMessage(from, { text: "Por favor, digite uma quantidade válida (maior que 0)." });
-                            return;
-                        }
-
-                        const product = await db('products').where({ id: session.lastProductId }).first();
-                        if (product) {
-                            // Adicionar ao carrinho (ou somar se já existir)
-                            const existingIndex = session.cart.findIndex(i => i.id === product.id);
-                            if (existingIndex > -1) {
-                                session.cart[existingIndex]!.quantity += quantity;
-                            } else {
-                                session.cart.push({
-                                    id: product.id,
-                                    name: product.name,
-                                    price: product.price,
-                                    quantity: quantity
-                                });
-                            }
-                            await sock.sendMessage(from, { text: `✅ Adicionado: ${quantity}x ${product.name}.\n\nDigite *MENU* para continuar comprando ou *CARRINHO* para ver seu pedido.` });
-                        }
-                        session.step = 'idle';
-                        delete session.lastProductId;
                     }
                 }
+                else if (session.step === 'awaiting_quantity' && /^\d+$/.test(input)) {
+                    const qty = parseInt(input);
+                    const product = await ProductService.getById(session.lastProductId!);
+                    if (product && qty > 0) {
+                        session.cart.push({ id: product.id, name: product.name, price: product.price, quantity: qty });
+                        session.step = 'idle';
+                        await sock.sendMessage(from, { text: `✅ Adicionado! Digite *CARRINHO* para ver ou envie o código de outro produto.` });
+                    }
+                }
+                else if (session.step === 'awaiting_address') {
+                    await CustomerService.updateAddress(from, text);
+                    session.step = 'idle';
+                    await sock.sendMessage(from, { text: "📍 Endereço salvo com sucesso! Digite *FINALIZAR* para concluir o pedido." });
+                }
+                else if (session.step === 'awaiting_confirmation' && (input === 'sim' || input === 's')) {
+                    const total = session.cart.reduce((s, i) => s + (i.price * i.quantity), 0);
+                    const orderId = await OrderService.create(from, session.cart, total);
+                    await sock.sendMessage(from, { text: `✅ Pedido #${orderId} realizado com sucesso! 🍻` });
+                    await sock.sendMessage(ADMIN_PHONE, { text: `🚀 *NOVO PEDIDO #${orderId}* de ${name}!\nTotal: R$ ${total.toFixed(2)}` });
+                    session.cart = [];
+                    session.step = 'idle';
+                }
+
+                await SessionService.save(session);
+            } catch (err) {
+                console.error("❌ Erro ao processar mensagem:", err);
             }
         }
     });
 }
 
-connectToWhatsApp().catch(err => console.log("Erro inesperado:", err));
+connectToWhatsApp().catch(err => console.log(err));

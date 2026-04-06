@@ -1,0 +1,18 @@
+{
+  "security": {
+    "auth": {
+      "selectedType": "oauth-personal"
+    }
+  },
+  "mcpServers": {
+    "zap-manager": {
+      "command": "tsx",
+      "args": ["/home/darigaz/distribuidora-zap/src/mcp-server.ts"],
+      "env": {
+        "SPREADSHEET_ID": "1IuLrsrk7jojykhVi0YmLruUld74YAknM4VLi5Sd2iDI",
+        "ADMIN_PHONE": "5561900000000@s.whatsapp.net"
+      },
+      "trust": true
+    }
+  }
+}
