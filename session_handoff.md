@@ -1,55 +1,28 @@
 # Handoff de Sessão - Distribuidora Zap
 
-## Estado Atual
-O MVP do bot de WhatsApp para a Distribuidora Zap foi corrigido e expandido. Corrigimos o problema de respostas invisíveis (JID/LID handling) e implementamos o **ReportService** para Business Intelligence. O bot agora está pronto para testes reais e geração de insights.
+## Estado Atual (06/04/2026)
+O projeto atingiu sua fase de **maturidade operacional**. O bot está rodando de forma estável no ambiente Linux, com suporte completo a JIDs e LIDs. O fluxo de vendas foi validado de ponta a ponta, incluindo persistência em SQLite e sincronização com serviços.
 
-## Funcionalidades Implementadas
-- [x] Conexão com WhatsApp via Baileys (Corrigido JID/LID handling).
-- [x] Prevenção de loops de mensagens (`fromMe` check).
-- [x] Menu dinâmico de produtos com categorias.
-- [x] Carrinho de compras (Adicionar, Remover [ID], Limpar).
-- [x] Cadastro automático de clientes.
-- [x] Captura e persistência de endereço de entrega.
-- [x] Resumo do pedido e confirmação final (SIM/NÃO).
-- [x] Validação de estoque real-time com transações SQL.
-- [x] Notificação automática para o Administrador com ID do pedido.
-- [x] Controle de Pedidos (Admin): Comandos `PEDIDOS` e `ENTREGUE [ID]`.
-- [x] Persistência de Sessão: SQLite (tabela `sessions`).
-- [x] Sanitização de Inputs: Validações rigorosas de quantidade e endereço.
-- [x] Google Sheets: Sincronização em tempo real de pedidos.
-- [x] Slack/Discord: Alertas instantâneos via Webhooks.
-- [x] **BI Reporting (Novo):** ReportService para faturamento, top produtos e estoque.
+### 🛠️ Melhorias Técnicas
+- **Ambiente:** Migração concluída para `/home/darigaz/distribuidora-zap` (WSL nativo), eliminando latência e erros de permissão de arquivos.
+- **Protocolo:** Implementada normalização de JID via `jidNormalizedUser` e suporte a IDs `88...`.
+- **UX Estável:** Reversão de botões nativos (instáveis) para um **Menu de Texto Interativo** robusto e visualmente atraente.
+- **Git:** Repositório limpo e organizado com `README.md` e `.gitignore`.
 
-## Depuração Resolvida
-- **Problema:** Bot recebia mensagens mas não enviava respostas visíveis.
-- **Causa:** O bot tentava normalizar JIDs concatenando `@s.whatsapp.net` indiscriminadamente, o que quebrava LIDs (WhatsApp IDs novos) e causava falhas silenciosas no envio.
-- **Solução:** Implementada detecção inteligente de JID/LID e adicionada proteção contra auto-resposta (`fromMe`).
+### ✅ Funcionalidades Testadas
+- [x] Saudação e exibição de cardápio formatado.
+- [x] Seleção de produtos por código numérico.
+- [x] Gestão de carrinho (adicionar, ver resumo, totalizar).
+- [x] Captura de endereço para novos clientes.
+- [x] Confirmação de pedido e baixa automática de estoque.
+- [x] Notificação administrativa para o dono.
 
-## Arquivos Criados/Modificados
-- `src/index.ts`: Corrigida lógica de JID e adicionado check de `fromMe`.
-- `src/services/reportService.ts`: Novo serviço para BI.
-- `generate-report.ts`: Script utilitário para gerar relatórios via CLI.
-- `check-db.ts`: Script utilitário para auditoria do banco de dados.
+## 🚀 Próximos Passos (Roadmap)
+1. **Business Intelligence (BI):** Expandir os relatórios automáticos para incluir lucratividade por categoria.
+2. **Alertas Proativos:** Ativar o monitoramento de estoque crítico via WhatsApp/Slack.
+3. **Pagamentos:** Integrar o fluxo de confirmação de PIX (manual ou automático).
+4. **Dashboard Web:** Iniciar o desenvolvimento de uma interface administrativa visual para gestão de estoque fora do WhatsApp.
 
-## Próximos Passos
-1. **Testes de Campo:** Realizar pedidos de números externos para validar o fluxo fim-a-fim.
-2. **Dashboard Web:** Considerar uma interface simples para visualização dos relatórios gerados pelo `ReportService`.
-3. **Escalabilidade MCP:** Integrar os serviços de BI e Sheets com servidores MCP dedicados se necessário.
-
-## 🚀 Planejamento de Expansão via MCP (Próxima Jornada)
-Para escalar a operação da Distribuidora Zap, utilizaremos o **Model Context Protocol** para as seguintes integrações:
-
-### 1. MCP Google Sheets (Operacional)
-- **Objetivo:** Sincronizar cada pedido finalizado em uma planilha compartilhada com os entregadores.
-- **Vantagem:** Gestão visual do fluxo de entregas sem necessidade de acesso ao banco de dados.
-
-### 2. MCP Slack/Discord (Comunicação Interna)
-- **Objetivo:** Disparar alertas em canais de "Logística" ou "Vendas" sempre que um pedido for confirmado ou cancelado.
-- **Vantagem:** Notificação centralizada para todo o time em tempo real.
-
-### 3. MCP SQLite/Postgres (Business Intelligence)
-- **Objetivo:** Realizar consultas complexas via MCP para gerar relatórios de "Produtos Mais Vendidos" e "Faturamento por Bairro".
-- **Vantagem:** Tomada de decisão baseada em dados diretamente pelo chat da IA.
-
-### 4. MCP Filesystem (Logs & Hardening)
-- **Objetivo:** Monitorar e auditar logs de erros críticos em diretórios específicos para garantir 99.9% de uptime do bot.
+## ⚠️ Notas Importantes
+- **Sessão:** A pasta `auth_info_baileys` não deve ser movida entre partições (Windows/Linux) para evitar corrupção de criptografia.
+- **Execução:** Sempre utilizar `npm start` de dentro de `/home/darigaz/distribuidora-zap`.
